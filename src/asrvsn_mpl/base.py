@@ -9,6 +9,10 @@ from typing import Tuple, Union, Optional, Callable, List
 import matplotlib.colors as mcolors
 import matplotlib as mpl
 import matplotlib.transforms as mtransforms
+from matplotlib.legend import Legend 
+from matplotlib.collections import PathCollection
+from matplotlib.patches import Patch
+from matplotlib.image import AxesImage
 
 import os
 
@@ -52,6 +56,22 @@ def label_subplots_mosaic(fig, axs: dict, loc=(4/72, -5/72), fontsize=14, bbox_k
 def set_color_cycle(colors: list):
     plt.rcParams['axes.prop_cycle'] = plt.cycler(color=colors)
 
+def rasterize_fig(fig):
+    for ax in fig.get_axes():
+        for child in ax.get_children():
+            if isinstance(child, AxesImage):
+                child.set_rasterized(True)
+            elif isinstance(child, Patch) and child not in ax.spines.values():
+                child.set_rasterized(True)
+            elif isinstance(child, PathCollection) and len(child.get_offsets()) > 20:
+                child.set_rasterized(True)
+            else:
+                child.set_rasterized(False)
+    for spine in ax.spines.values():
+        spine.set_rasterized(False)
+    return fig
+
+
 ''' 2d plot utils '''
 
 plots = []
@@ -63,6 +83,7 @@ tight_layout_rect = [0, 0.03, 1, 0.95]
 def_mosaic_height = 4 # Per panel 
 def_mosaic_width = 4 # Per panel
 chars = 'abcdefghijklmnopqrstuvwxyz'
+upperchars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 def set_gridspec(gs: dict):
     global gridspec
@@ -252,6 +273,22 @@ def replace_3d_mosaic(axs: dict, layout: list, key: Any):
                 axs[key] = plt.subplot(nrows, ncols, i * ncols + j + 1, projection='3d')
                 return
 
+''' Annotation '''
+
+def label_ax(ax, i, **kwargs):
+    title = i if type(i) is str else upperchars[i]
+    kwargs = dict(xy=(0.05, 0.95), xycoords='axes fraction', ha='left', va='top', fontsize=22) | kwargs
+    ax.annotate(r'\textbf{'+title+r'} ', **kwargs)
+
+def title_ax(ax, title: str, **kwargs):
+    kwargs = dict(xy=(0.5, 1.05), xycoords='axes fraction', ha='center', va='center', fontsize=22) | kwargs
+    ax.annotate(title, **kwargs)
+
+def left_title_ax(ax, title: str, offset: float=-0.05, **kwargs):
+    kwargs = dict(xy=(offset, 0.5), xycoords='axes fraction', ha='center', va='center', fontsize=22, rotation=90) | kwargs
+    ax.annotate(title, **kwargs)
+
+
 ''' 1d/2d plots '''
 
 def ax_im_gray(ax, data: np.ndarray, invert: bool=False):
@@ -359,9 +396,10 @@ def ax_planar_polygons(ax: plt.Axes, polygons: List[PlanarPolygon], cmap: Callab
             cmap = lambda _: [fillcolor] * len(polygons)
     colors = cmap(polygons)
     assert len(colors) == len(polygons)
+    patchkw = {'alpha': alpha, 'zorder': zorder} | ({'transform': kwargs['transform']} if 'transform' in kwargs else {})
     for i, poly in enumerate(polygons):
         p = np.array(poly.to_shapely().exterior.coords)
-        patch = mpatches.Polygon(p, facecolor=colors[i], alpha=alpha, zorder=zorder)
+        patch = mpatches.Polygon(p, facecolor=colors[i], **patchkw)
         ax.add_patch(patch)
         if kwargs.get('linewidth', 1) > 0:
             pkwargs = kwargs.copy()
@@ -440,16 +478,25 @@ def ax_rect_callout(
 def ax_square_callout(ax: plt.Axes, center1: np.ndarray, r1: float, center2: np.ndarray, r2: float, **kwargs):
     ax_rect_callout(ax, center1, (r1, r1), center2, (r2, r2), **kwargs)
 
-def ax_scale_bar(ax, length, right_pad=0.05, bottom_pad=0.05, **kwargs):
+def ax_scale_bar(ax, length, upp: float=1.0, units='', right_pad=0.05, bottom_pad=0.05, text_pad=0.07, label=True, fontsize=16, color='white', **kwargs):
+    '''
+    upp: units per pixel (e.g. microns)
+    '''
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
     x_pad_data = right_pad * (xlim[1] - xlim[0])
     y_pad_data = bottom_pad * (ylim[1] - ylim[0])
-    x_start = xlim[1] - x_pad_data - length
+    pix_length = length / upp
+    x_start = xlim[1] - x_pad_data - pix_length
     x_end = xlim[1] - x_pad_data
     y_pos = ylim[0] + y_pad_data
-    kwargs = dict(color='white', linewidth=4) | kwargs
+    kwargs = dict(color=color, linewidth=4) | kwargs
     ax.plot([x_start, x_end], [y_pos, y_pos], **kwargs)
+    if label:
+        # y_pos += text_pad * (ylim[1] - ylim[0])
+        # ax.text((x_start + x_end) / 2, y_pos, f'{length:.0f} {units}', ha='center', va='bottom', fontsize=fontsize, color=color, bbox=dict(facecolor='none', edgecolor=color, margin=8.0))
+        x_text = 1 - right_pad - pix_length/(2*(xlim[1]-xlim[0]))
+        ax.annotate(f'{length:.0f} {units}', xy=(x_text, text_pad), xycoords='axes fraction', ha='center', va='bottom', fontsize=fontsize, color=color)
 
 def ax_orientations(ax: plt.Axes, centers: np.ndarray, polygons: List[PlanarPolygon], colors=['grey', 'white'], **kwargs):
     ''' Plot orientation crossbar of polygons using their second moments ''' 
@@ -470,15 +517,16 @@ def ax_ellipse(ax: plt.Axes, ellipse: Ellipsoid, axes: bool=False, major_axis_co
     circ = np.array([np.cos(theta), np.sin(theta)]).T
     pts = ellipse.map_sphere(circ)
     ax.plot(pts[:,0], pts[:,1], **kwargs)
+    exargs = dict(transform=kwargs['transform']) if 'transform' in kwargs else {}
     if axes:
         # Draw major & minor axes
         P, rs = ellipse.get_axes_stretches()
         for i in range(ellipse.ndim):
             e1 = ellipse.v + P[:,i] * rs[i]
             e2 = ellipse.v - P[:,i] * rs[i]
-            ax.plot([e1[0], e2[0]], [e1[1], e2[1]], color=[major_axis_color, minor_axis_color][i], linewidth=axes_linewidth)
+            ax.plot([e1[0], e2[0]], [e1[1], e2[1]], color=[major_axis_color, minor_axis_color][i], linewidth=axes_linewidth, **exargs)
     if not fill_color is None:
-        ax.fill(pts[:,0], pts[:,1], facecolor=fill_color, alpha=fill_alpha)
+        ax.fill(pts[:,0], pts[:,1], facecolor=fill_color, alpha=fill_alpha, **exargs)
 
 def ax_ellipses(ax: plt.Axes, ellipses: List[Ellipsoid], **kwargs):
     for e in ellipses:

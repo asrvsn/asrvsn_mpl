@@ -2,7 +2,7 @@
 Random variable functions
 '''
 
-from typing import Dict, List
+from typing import Dict, List, Tuple, Union, Optional
 import scipy.stats as stats
 import numpy as np
 import matplotlib.pyplot as plt
@@ -53,6 +53,9 @@ def make_rv_title(rv: stats.rv_continuous, prms: tuple) -> str:
     elif rv == stats.norm:
         loc, scale = prms
         return r'$'+f'W_{{{round(loc, 3)},{round(scale, 3)}}}'+r'$'
+    elif rv == stats.invgamma:
+        a, loc, scale = prms
+        return add_loc(add_scale(f'$Y^{{-1}}_{{{round(a, 3)},1}}$', scale), loc)
     else:
         raise ValueError(f'Unknown random variable: {rv}')
 
@@ -90,6 +93,31 @@ def prms_to_dict(rv: stats.rv_continuous, prms: tuple) -> Dict[str, float]:
     else:
         raise ValueError(f'Unknown random variable: {rv}')
 
+def fit_rv(data: np.ndarray, rv: stats.rv_continuous, loc: float=None, scale: float=None, pvalue: bool=False, pvalue_statistic: str='ks') -> Tuple[tuple, Optional[float]]:
+    '''
+    Fit rv. If pvalue is requested, return type is ((...params), pvalue) else ((...params), None)
+    '''
+    known_params = dict()
+    if loc != None:
+        known_params['loc'] = loc
+    if scale != None:
+        known_params['scale'] = scale
+    fixed_params = {f'f{k}': v for k, v in known_params.items()}
+    prms = rv.fit(data, **fixed_params)
+    if pvalue:
+        if pvalue_statistic == 'ks':
+            rvi = rv(*prms) # Random variable instance  
+            # Use exact calculation for Kolmogorov-Smirnov
+            p = stats.ks_1samp(data, rvi.cdf).pvalue
+        else:
+            # Use Monte Carlo approximation for other statistics
+            fit_params = {k: v for k, v in prms_to_dict(rv, prms).items() if not (k in known_params)}
+            gof_res = stats.goodness_of_fit(rv, data, known_params=known_params, fit_params=fit_params, statistic=pvalue_statistic)
+            p = gof_res.pvalue
+    else:
+        p = None
+    return prms, p
+
 def plot_hist_rvs(
             ax: plt.Axes, 
             data: np.ndarray, 
@@ -103,7 +131,7 @@ def plot_hist_rvs(
             log: bool=True, 
             bins: int=50, 
             pvalues: bool=False, 
-            pvalue_statistic: str='ad',
+            pvalue_statistic: str='ks',
             legend_loc: str='upper right',
             linewidth: float=0.5, 
             alpha=0.5,
@@ -131,20 +159,11 @@ def plot_hist_rvs(
     ax.hist(data, bins=bins, density=True, histtype='stepfilled', alpha=alpha, **kwargs)
     support = np.linspace(xmin, xmax, 100)
     for i, rv in enumerate(rvs):
-        known_params = dict()
-        if loc != None:
-            known_params['loc'] = loc
-        if scale != None:
-            known_params['scale'] = scale
-        fixed_params = {f'f{k}': v for k, v in known_params.items()}
-        prms = rv.fit(data, **fixed_params)
+        prms, p = fit_rv(data, rv, loc=loc, scale=scale, pvalue=pvalues, pvalue_statistic=pvalue_statistic)
         rvi = rv(*prms) # Random variable instance
         pdf = rvi.pdf(support)
         title = make_rv_title(rv, prms)
         if pvalues:
-            fit_params = {k: v for k, v in prms_to_dict(rv, prms).items() if not (k in known_params)}
-            gof_res = stats.goodness_of_fit(rv, data, known_params=known_params, fit_params=fit_params, statistic=pvalue_statistic)
-            p = gof_res.pvalue
             ptitle = r'$p_{\text{' + pvalue_statistic + r'}}$'
             title += f' ({ptitle}={round(p, 3)})'
         linestyle = (0, (4*(i+1), 2))

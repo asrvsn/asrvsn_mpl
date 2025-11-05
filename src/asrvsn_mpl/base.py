@@ -58,17 +58,34 @@ def set_color_cycle(colors: list):
 
 def rasterize_fig(fig):
     for ax in fig.get_axes():
-        for child in ax.get_children():
-            if isinstance(child, AxesImage):
-                child.set_rasterized(True)
-            elif isinstance(child, Patch) and child not in ax.spines.values():
-                child.set_rasterized(True)
-            elif isinstance(child, PathCollection) and len(child.get_offsets()) > 20:
-                child.set_rasterized(True)
-            else:
-                child.set_rasterized(False)
-    for spine in ax.spines.values():
-        spine.set_rasterized(False)
+        # For 3D axes, set a figure-level rasterization with zorder
+        if isinstance(ax, Axes3D):
+            # Force rasterization for 3D axes by setting a low rasterization zorder
+            # and making sure all children have a zorder lower than this
+            ax.set_rasterization_zorder(100)
+            
+            # Ensure all collections and artists in the 3D axes have a low zorder
+            for child in ax.get_children():
+                child.set_zorder(0)  # This ensures they get rasterized
+                # Force rasterization on key 3D elements
+                if hasattr(child, 'set_rasterized'):
+                    child.set_rasterized(True)
+        else:
+            # For 2D axes, selectively rasterize elements
+            for child in ax.get_children():
+                if isinstance(child, AxesImage):
+                    child.set_rasterized(True)
+                elif isinstance(child, Patch) and child not in ax.spines.values():
+                    child.set_rasterized(True)
+                elif isinstance(child, PathCollection) and len(child.get_offsets()) > 20:
+                    child.set_rasterized(True)
+                else:
+                    child.set_rasterized(False)
+            
+            # Keep spines vector-based for this specific 2D axis
+            for spine in ax.spines.values():
+                spine.set_rasterized(False)
+                
     return fig
 
 
@@ -532,9 +549,9 @@ def ax_ellipses(ax: plt.Axes, ellipses: List[Ellipsoid], **kwargs):
     for e in ellipses:
         ax_ellipse(ax, e, **kwargs)
 
-def ax_tri_2d(ax: plt.Axes, pts: np.ndarray, simplices: np.ndarray, **kwargs):
+def ax_tri_2d(ax: plt.Axes, pts: np.ndarray, simplices: np.ndarray, facecolor: str='none', **kwargs):
     assert pts.shape[1] == 2
-    ax_poly2d(ax, pts, simplices, facecolors=['blue'] * simplices.shape[0], **kwargs)
+    ax_poly2d(ax, pts, simplices, facecolors=[facecolor] * simplices.shape[0], **kwargs)
     ax.set_axis_off()
     ax.set_aspect('equal')
 
@@ -771,6 +788,151 @@ def ax_plane(ax: plt.Axes, pln: Plane, color='y', alpha=0.3, arrow=True, **kwarg
         nb = pln.b * pln.n
         ax.quiver(0, 0, 0, nb[0], nb[1], nb[2], color='r', zorder=100)
     ax.set_aspect('equal')
+
+def add_xyz_axes_widget(ax, scale=0.1, pos_2d=(0.1, 0.1), colors=('r', 'g', 'b')):
+    """
+    Add a simple XYZ axis indicator to a matplotlib 3D plot with a cube
+    at the origin to help with depth perception.
+    
+    Parameters:
+    -----------
+    ax : Axes3D
+        The 3D axes to add the widget to
+    scale : float
+        Size of the orientation axes widget relative to the figure
+    pos_2d : tuple
+        2D position (x, y) of the widget origin in normalized coordinates (0-1)
+        relative to the main axes
+    colors : tuple
+        Colors for the X, Y, and Z axes
+    """
+    # Create a new set of axes for the widget
+    fig = ax.figure
+    
+    # Get the boundaries of the figure in display coordinates
+    bbox = ax.get_position()
+    
+    # Create axes for the widget in a specific position in 2D
+    # Use the scale parameter to determine the widget size
+    widget_width = scale  # Size of widget as fraction of figure width
+    widget_height = scale  # Size of widget as fraction of figure height
+    
+    # Calculate position in normalized figure coordinates
+    widget_left = bbox.x0 + pos_2d[0] * bbox.width
+    widget_bottom = bbox.y0 + pos_2d[1] * bbox.height
+    
+    widget_ax = fig.add_axes(
+        [widget_left, widget_bottom, widget_width, widget_height],
+        projection='3d'
+    )
+    
+    # Remove all ticks, labels, etc.
+    widget_ax.set_axis_off()
+    
+    # Set the widget axes limits to a simple cubic space
+    widget_ax.set_xlim(-0.1, 0.9)  # Shifted to have more room in positive direction
+    widget_ax.set_ylim(-0.1, 0.9)
+    widget_ax.set_zlim(-0.1, 0.9)
+    
+    # Match the view angle of the main axes
+    widget_ax.view_init(elev=ax.elev, azim=ax.azim)
+    widget_ax.dist = ax.dist
+    
+    # Define line length
+    line_len = 0.8  # Slightly less than unit length to leave room for labels
+    origin = np.array([0, 0, 0])
+    
+    # Add a cube at the origin
+    # Define the cube size - make it larger (35% of line length)
+    cube_size = line_len * 0.4
+    
+    # Position the cube with its corner at the origin, extending into positive space
+    # Define the 8 vertices of the cube
+    cube_vertices = np.array([
+        [0, 0, 0],                       # 0: origin corner
+        [cube_size, 0, 0],               # 1: +x corner
+        [cube_size, cube_size, 0],       # 2: +x,+y corner
+        [0, cube_size, 0],               # 3: +y corner
+        [0, 0, cube_size],               # 4: +z corner
+        [cube_size, 0, cube_size],       # 5: +x,+z corner
+        [cube_size, cube_size, cube_size], # 6: +x,+y,+z corner
+        [0, cube_size, cube_size]        # 7: +y,+z corner
+    ])
+    
+    # Define the 6 faces of the cube using vertex indices
+    faces = [
+        [0, 1, 2, 3],  # bottom face (z=0)
+        [4, 5, 6, 7],  # top face (z=cube_size)
+        [0, 1, 5, 4],  # back face (y=0)
+        [2, 3, 7, 6],  # front face (y=cube_size)
+        [0, 3, 7, 4],  # left face (x=0)
+        [1, 2, 6, 5]   # right face (x=cube_size)
+    ]
+    
+    # Create face colors - lighter for faces that are more visible in typical view
+    face_colors = [
+        '#e0e0e0',  # bottom (z=0)
+        '#f8f8f8',  # top (z=cube_size)
+        '#d0d0d0',  # back (y=0)
+        '#f0f0f0',  # front (y=cube_size)
+        '#d8d8d8',  # left (x=0)
+        '#e8e8e8'   # right (x=cube_size)
+    ]
+    
+    # Create the 3D collection for the cube
+    cube = art3d.Poly3DCollection(
+        [[cube_vertices[idx] for idx in face] for face in faces],
+        facecolors=face_colors,
+        edgecolors='#808080',
+        linewidths=0.5,
+        alpha=0.9
+    )
+    widget_ax.add_collection3d(cube)
+    
+    # Draw lines for each axis (without arrowheads)
+    lines = []
+    # Position for axis labels
+    text_offsets = {
+        'x': [1.2, 0, 0],  # X label offset
+        'y': [0, 1.2, 0],  # Y label offset
+        'z': [0, 0, 1.2]   # Z label offset
+    }
+    
+    for i, (axis, color) in enumerate(zip(['x', 'y', 'z'], colors)):
+        # Create end point
+        end_point = np.zeros(3)
+        end_point[i] = line_len
+        
+        # Draw line from origin (0,0,0) all the way to end point
+        # (not starting at cube edge)
+        line = widget_ax.plot(
+            [origin[0], end_point[0]],
+            [origin[1], end_point[1]],
+            [origin[2], end_point[2]],
+            color=color, linewidth=2
+        )[0]  # [0] to get the Line3D object from the returned list
+        
+        lines.append(line)
+        
+        # Custom text position for each axis
+        offset = np.array(text_offsets[axis]) * line_len
+        text_pos = origin + offset
+        
+        widget_ax.text(
+            text_pos[0], text_pos[1], text_pos[2], 
+            axis.upper(), 
+            color=color, 
+            fontweight='bold', 
+            fontsize=10,
+            ha='center',
+            va='center'
+        )
+    
+    # Make the widget axes transparent
+    widget_ax.set_facecolor('none')
+    
+    # Return both the widget axes and the lines
+    return widget_ax, lines
 
 if __name__ == '__main__':
     # Test things
